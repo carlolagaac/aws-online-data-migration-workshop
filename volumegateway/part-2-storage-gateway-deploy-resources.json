@@ -1,0 +1,508 @@
+{
+    "AWSTemplateFormatVersion": "2010-09-09",
+    "Metadata": {
+        "AWS::CloudFormation::Interface": {
+            "ParameterGroups": [
+
+                {
+                    "Label": { "default": "AWS - Resource deployment"},
+                    "Parameters": [ "vpc", "subnet", "KeyName", "SecurityGroupIds", "LatestWindowsAmiId", "LatestLinuxAmiId" ]
+                }
+            ],
+
+		"ParameterLabels" : { "VpcCIDR" : { "default" : "Which VPC should this be deployed to?" } }
+		}
+	},
+
+	"Parameters": {
+
+        "vpc" : {
+            "Description": "VPC to deploy resources into",
+            "Type" : "AWS::EC2::VPC::Id"
+        },
+
+            "subnet" : {
+            "Description": "Subnet to deploy resources into",
+            "Type" : "AWS::EC2::Subnet::Id"
+        },
+
+        "SecurityGroupIds" : {
+            "Description" : "Specify the security froup for resources",
+            "Type" : "List<AWS::EC2::SecurityGroup::Id>"
+        },
+
+        "KeyName": {
+            "Description": "Name of an existing EC2 KeyPair to enable SSH access to the Linux instance",
+            "Type": "AWS::EC2::KeyPair::KeyName",
+            "ConstraintDescription": "must be the name of an existing EC2 KeyPair."
+         },
+
+        "LatestWindowsAmiId": {
+            "Description": "Do Not modify the below default value",
+            "Type": "AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>",
+            "Default": "/aws/service/ami-windows-latest/Windows_Server-2019-English-Full-Base"
+         },
+
+        "LatestLinuxAmiId": {
+            "Description": "Do Not modify the below default value",
+            "Type": "AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>",
+            "Default": "/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2"
+         }
+	},
+
+    "Resources": {
+
+
+      "WindowsInstanceProfile": {
+        "Properties": {
+          "Path": "/",
+          "Roles": [ { "Ref": "WindowsInstanceRole" } ] },
+        "Type": "AWS::IAM::InstanceProfile"
+      },
+      "WindowsInstanceRole": {
+        "Type": "AWS::IAM::Role",
+        "DeletionPolicy" : "Delete",
+        "Properties": {
+          "AssumeRolePolicyDocument": {
+            "Statement": [ {
+              "Action": [ "sts:AssumeRole" ],
+              "Effect": "Allow",
+              "Principal": { "Service": [ "ec2.amazonaws.com" ] }
+            }
+            ],
+            "Version": "2012-10-17"
+          }
+        }
+      },
+      "WindowsInstanceRolePolicy": {
+        "Type": "AWS::IAM::Policy",
+        "DeletionPolicy" : "Delete",
+        "Properties": {
+          "PolicyName": { "Fn::Join": [ "", [ "Windows-client-", { "Ref": "AWS::StackName" } ] ] },
+          "Roles": [ { "Ref": "WindowsInstanceRole" } ],
+          "PolicyDocument": {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Effect": "Allow",
+                "Action": "secretsmanager:*",
+                "Resource": "*"
+              },
+              {
+                "Effect" : "Allow",
+                "Action": [ "s3:Get*", "s3:List*" ],
+                "Resource" : "*"
+              }
+            ]
+          }
+        }
+      },
+      "AdminSecret": {
+        "Type": "AWS::SecretsManager::Secret",
+        "Properties": {
+          "Description": "Admin Password for workshop.",
+          "GenerateSecretString": {
+            "PasswordLength": 12,
+            "ExcludeCharacters": "\"@/\\"
+          }
+        }
+      },
+
+      "WindowsFileGWInstance" : {
+         "Type" : "AWS::EC2::Instance",
+         "CreationPolicy": {
+           "ResourceSignal": {
+           "Timeout": "PT60M"
+           }
+         },
+         "Metadata": {
+           "AWS::CloudFormation::Init": {
+             "configSets": {
+               "config": [ "configurewindows" ]
+             },
+             "configurewindows": {
+               "commands": {
+                 "1-change-admin-password": {
+                   "command": { "Fn::Join":
+                     [ "",
+                       [
+                         "powershell do {",
+                           "try {",
+                             "($password = (Get-SECSecretValue -SecretId ", { "Ref": "AdminSecret" }, " ).SecretString) -and",
+                             "(Set-LocalUser -Name Administrator -Password (ConvertTo-SecureString -AsPlainText \"$password\" -Force));",
+                             "$success = $true",
+                           "} catch {",
+                             "Start-sleep -Seconds 5",
+                           "}",
+                         "} until($success)"
+                       ]
+                     ]
+                   },
+                   "waitAfterCompletion": "0"
+                 },
+
+                 "1-disable-ie-esc": {
+                   "command": { "Fn::Join":
+                     [ "",
+                       [ "powershell ",
+                         "Set-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Active Setup\\Installed Components\\{A509B1A7-37EF-4b3f-8CFC-4F3A74704073}' -Name IsInstalled -Value 0 -Force;\"\n"
+                       ]
+                     ]
+                   },
+                   "waitAfterCompletion": "0"
+                 },
+
+                 "2-download-awscli": {
+                   "command": "powershell Invoke-WebRequest \"https://s3.amazonaws.com/aws-cli/AWSCLI64.msi\" -OutFile c:\\AWSCLI64.msi\n",
+                   "waitAfterCompletion": "0"
+                 },
+                 "3-install-awscli": {
+                   "command": "start c:\\AWSCLI64.msi /qb",
+                   "waitAfterCompletion": "0"
+                 },
+                 "4-download-chrome": {
+                   "command": "powershell Invoke-WebRequest \"http://dl.google.com/chrome/install/375.126/chrome_installer.exe\" -OutFile c:\\chrome-installer.exe\n",
+                   "waitAfterCompletion": "0"
+                 },
+                 "5-install-chrome": {
+                   "command": "powershell Start-Process -FilePath c:\\chrome-installer.exe -Args '/silent /install' -Verb RunAs -Wait\n",
+                   "waitAfterCompletion": "0"
+                 },
+                 "6-signal-complete": {
+                   "command": "c:\\complete.cmd",
+                   "waitAfterCompletion": "0"
+                 }
+               }
+             }
+           }
+         },
+
+         "Properties" : {
+             "ImageId": { "Ref" : "LatestWindowsAmiId" },
+             "InstanceType" : "c5.xlarge",
+             "SecurityGroupIds" : { "Ref" : "SecurityGroupIds"},
+             "SubnetId" : {"Ref" : "subnet"},
+             "IamInstanceProfile": { "Ref": "WindowsInstanceProfile" },
+             "Tags": [{"Key": "Name", "Value": "Workshop Windows FileGW Instance"}],
+             "UserData": {
+               "Fn::Base64": {
+                 "Fn::Join": [
+                   "",
+                   [
+                     "<script>\n",
+                     "powershell echo \"Windows-Instance-Public-IP=\" \"\" \"Linux-Instance-Private-IP=\" \"\" \"File-Gateway-Instance-Private-IP=\" \"\" \"Source-S3-Bucket=\" \"\" \"Target-S3-Bucket=\" \"\" \"First-NFS-FileShare-mount-command=\" \"\" \"Second-NFS-FileShare-mount-command=\" \"\" \"DataSync-Instance-Private-IP=\" \"\" \"Transfer-For-SFTP-Endpoint-IP-Address=\" >  c:\\users\\administrator\\desktop\\workshop.txt\n",
+                     "echo :retryloop >> c:\\complete.cmd\n",
+                     "echo cfn-signal.exe -e 0 --stack ", { "Ref": "AWS::StackName" }," --resource WindowsFileGWInstance --region ", { "Ref" : "AWS::Region" }," >> c:\\complete.cmd\n",
+                     "echo IF ERRORLEVEL 1 ( >> c:\\complete.cmd\n",
+                     "echo timeout 5 ^&^& GOTO retryloop >> c:\\complete.cmd\n",
+                     "echo ) >> c:\\complete.cmd\n",
+                     "cfn-init.exe -v -c config -s ", { "Ref": "AWS::StackId" }, " -r WindowsFileGWInstance --region ", { "Ref": "AWS::Region" }, "\n",
+                     "</script>\n"
+                   ]
+                 ]
+               }
+             }
+           }
+         },
+
+      "WindowsVolGWInstance" : {
+          "Type" : "AWS::EC2::Instance",
+          "CreationPolicy": {
+            "ResourceSignal": {
+            "Timeout": "PT60M"
+            }
+          },
+          "Metadata": {
+            "AWS::CloudFormation::Init": {
+              "configSets": {
+                "config": [ "configurewindows" ]
+              },
+              "configurewindows": {
+                "commands": {
+                  "1-change-admin-password": {
+                    "command": { "Fn::Join":
+                      [ "",
+                        [
+                          "powershell do {",
+                            "try {",
+                              "($password = (Get-SECSecretValue -SecretId ", { "Ref": "AdminSecret" }, " ).SecretString) -and",
+                              "(Set-LocalUser -Name Administrator -Password (ConvertTo-SecureString -AsPlainText \"$password\" -Force));",
+                              "$success = $true",
+                            "} catch {",
+                              "Start-sleep -Seconds 5",
+                            "}",
+                          "} until($success)"
+                        ]
+                      ]
+                    },
+                    "waitAfterCompletion": "0"
+                  },
+ 
+                  "1-disable-ie-esc": {
+                    "command": { "Fn::Join":
+                      [ "",
+                        [ "powershell ",
+                          "Set-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Active Setup\\Installed Components\\{A509B1A7-37EF-4b3f-8CFC-4F3A74704073}' -Name IsInstalled -Value 0 -Force;\"\n"
+                        ]
+                      ]
+                    },
+                    "waitAfterCompletion": "0"
+                  },
+ 
+                  "2-download-awscli": {
+                    "command": "powershell Invoke-WebRequest \"https://s3.amazonaws.com/aws-cli/AWSCLI64.msi\" -OutFile c:\\AWSCLI64.msi\n",
+                    "waitAfterCompletion": "0"
+                  },
+                  "3-install-awscli": {
+                    "command": "start c:\\AWSCLI64.msi /qb",
+                    "waitAfterCompletion": "0"
+                  },
+                  "4-download-chrome": {
+                    "command": "powershell Invoke-WebRequest \"http://dl.google.com/chrome/install/375.126/chrome_installer.exe\" -OutFile c:\\chrome-installer.exe\n",
+                    "waitAfterCompletion": "0"
+                  },
+                  "5-install-chrome": {
+                    "command": "powershell Start-Process -FilePath c:\\chrome-installer.exe -Args '/silent /install' -Verb RunAs -Wait\n",
+                    "waitAfterCompletion": "0"
+                  },
+                  "6-signal-complete": {
+                    "command": "c:\\complete.cmd",
+                    "waitAfterCompletion": "0"
+                  }
+                }
+              }
+            }
+          },
+          "Properties" : {
+              "ImageId": { "Ref" : "LatestWindowsAmiId" },
+              "InstanceType" : "c5.xlarge",
+              "SecurityGroupIds" : { "Ref" : "SecurityGroupIds"},
+              "SubnetId" : {"Ref" : "subnet"},
+              "IamInstanceProfile": { "Ref": "WindowsInstanceProfile" },
+              "Tags": [{"Key": "Name", "Value": "Workshop Windows VolGW Instance"}],
+              "UserData": {
+                "Fn::Base64": {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "<script>\n",
+                      "powershell echo \"Windows-Instance-Public-IP=\" \"\" \"Linux-Instance-Private-IP=\" \"\" \"File-Gateway-Instance-Private-IP=\" \"\" \"Source-S3-Bucket=\" \"\" \"Target-S3-Bucket=\" \"\" \"First-NFS-FileShare-mount-command=\" \"\" \"Second-NFS-FileShare-mount-command=\" \"\" \"DataSync-Instance-Private-IP=\" \"\" \"Transfer-For-SFTP-Endpoint-IP-Address=\" >  c:\\users\\administrator\\desktop\\workshop.txt\n",
+                      "echo :retryloop >> c:\\complete.cmd\n",
+                      "echo cfn-signal.exe -e 0 --stack ", { "Ref": "AWS::StackName" }," --resource WindowsVolGWInstance --region ", { "Ref" : "AWS::Region" }," >> c:\\complete.cmd\n",
+                      "echo IF ERRORLEVEL 1 ( >> c:\\complete.cmd\n",
+                      "echo timeout 5 ^&^& GOTO retryloop >> c:\\complete.cmd\n",
+                      "echo ) >> c:\\complete.cmd\n",
+                      "cfn-init.exe -v -c config -s ", { "Ref": "AWS::StackId" }, " -r WindowsVolGWInstance --region ", { "Ref": "AWS::Region" }, "\n",
+                      "</script>\n"
+                    ]
+                  ]
+                }
+              }
+            }
+          },
+
+      "WindowsTapeGWInstance" : {
+            "Type" : "AWS::EC2::Instance",
+            "CreationPolicy": {
+              "ResourceSignal": {
+              "Timeout": "PT60M"
+              }
+            },
+            "Metadata": {
+              "AWS::CloudFormation::Init": {
+                "configSets": {
+                  "config": [ "configurewindows" ]
+                },
+                "configurewindows": {
+                  "commands": {
+                    "1-change-admin-password": {
+                      "command": { "Fn::Join":
+                        [ "",
+                          [
+                            "powershell do {",
+                              "try {",
+                                "($password = (Get-SECSecretValue -SecretId ", { "Ref": "AdminSecret" }, " ).SecretString) -and",
+                                "(Set-LocalUser -Name Administrator -Password (ConvertTo-SecureString -AsPlainText \"$password\" -Force));",
+                                "$success = $true",
+                              "} catch {",
+                                "Start-sleep -Seconds 5",
+                              "}",
+                            "} until($success)"
+                          ]
+                        ]
+                      },
+                      "waitAfterCompletion": "0"
+                    },
+   
+                    "1-disable-ie-esc": {
+                      "command": { "Fn::Join":
+                        [ "",
+                          [ "powershell ",
+                            "Set-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Active Setup\\Installed Components\\{A509B1A7-37EF-4b3f-8CFC-4F3A74704073}' -Name IsInstalled -Value 0 -Force;\"\n"
+                          ]
+                        ]
+                      },
+                      "waitAfterCompletion": "0"
+                    },
+   
+                    "2-download-awscli": {
+                      "command": "powershell Invoke-WebRequest \"https://s3.amazonaws.com/aws-cli/AWSCLI64.msi\" -OutFile c:\\AWSCLI64.msi\n",
+                      "waitAfterCompletion": "0"
+                    },
+                    "3-install-awscli": {
+                      "command": "start c:\\AWSCLI64.msi /qb",
+                      "waitAfterCompletion": "0"
+                    },
+                    "4-download-chrome": {
+                      "command": "powershell Invoke-WebRequest \"http://dl.google.com/chrome/install/375.126/chrome_installer.exe\" -OutFile c:\\chrome-installer.exe\n",
+                      "waitAfterCompletion": "0"
+                    },
+                    "5-install-chrome": {
+                      "command": "powershell Start-Process -FilePath c:\\chrome-installer.exe -Args '/silent /install' -Verb RunAs -Wait\n",
+                      "waitAfterCompletion": "0"
+                    },
+                    "6-signal-complete": {
+                      "command": "c:\\complete.cmd",
+                      "waitAfterCompletion": "0"
+                    }
+                  }
+                }
+              }
+            },
+            "Properties" : {
+                "ImageId": { "Ref" : "LatestWindowsAmiId" },
+                "InstanceType" : "c5.xlarge",
+                "SecurityGroupIds" : { "Ref" : "SecurityGroupIds"},
+                "SubnetId" : {"Ref" : "subnet"},
+                "IamInstanceProfile": { "Ref": "WindowsInstanceProfile" },
+                "Tags": [{"Key": "Name", "Value": "Workshop Windows Tape GW Instance"}],
+                "UserData": {
+                  "Fn::Base64": {
+                    "Fn::Join": [
+                      "",
+                      [
+                        "<script>\n",
+                        "powershell echo \"Windows-Instance-Public-IP=\" \"\" \"Linux-Instance-Private-IP=\" \"\" \"File-Gateway-Instance-Private-IP=\" \"\" \"Source-S3-Bucket=\" \"\" \"Target-S3-Bucket=\" \"\" \"First-NFS-FileShare-mount-command=\" \"\" \"Second-NFS-FileShare-mount-command=\" \"\" \"DataSync-Instance-Private-IP=\" \"\" \"Transfer-For-SFTP-Endpoint-IP-Address=\" >  c:\\users\\administrator\\desktop\\workshop.txt\n",
+                        "echo :retryloop >> c:\\complete.cmd\n",
+                        "echo cfn-signal.exe -e 0 --stack ", { "Ref": "AWS::StackName" }," --resource WindowsTapeGWInstance --region ", { "Ref" : "AWS::Region" }," >> c:\\complete.cmd\n",
+                        "echo IF ERRORLEVEL 1 ( >> c:\\complete.cmd\n",
+                        "echo timeout 5 ^&^& GOTO retryloop >> c:\\complete.cmd\n",
+                        "echo ) >> c:\\complete.cmd\n",
+                        "cfn-init.exe -v -c config -s ", { "Ref": "AWS::StackId" }, " -r WindowsTapeGWInstance --region ", { "Ref": "AWS::Region" }, "\n",
+                        "</script>\n"
+                      ]
+                    ]
+                  }
+                }
+              }
+            },
+    
+
+	"LinuxInstance" : {
+      "Type" : "AWS::EC2::Instance",
+      "Properties" : {
+        "ImageId": { "Ref" : "LatestLinuxAmiId" },
+        "KeyName" : { "Ref" : "KeyName" },
+        "InstanceType" : "m5.xlarge",
+		      "IamInstanceProfile" : { "Ref" : "s3ROInstanceProfile" },
+        "SecurityGroupIds" : { "Ref" : "SecurityGroupIds"},
+        "SubnetId" : {"Ref" : "subnet"},
+        "Tags": [{"Key": "Name", "Value": "Workshop Linux Instance 1"}],
+		      "UserData" : { "Fn::Base64" : { "Fn::Join" : ["", [
+          "#!/bin/bash\n",
+          "yum install -y aws-cfn-bootstrap\n",
+          "sudo su\n",
+          "mkdir /temp\n",
+          "aws s3 sync s3://ee-assets-prod-us-west-2/modules/2343f58921ff4b66b136904c1265d64b/v1/prescript /temp\n",
+			    "chmod 755 /temp/prescript.sh\n",
+          "cd /temp\n",
+          "./prescript.sh\n",
+          "rm prescript.sh\n"
+          			  ]]}}
+          }
+       },
+
+
+	 "s3ROInstanceProfile" : {
+      "Type" : "AWS::IAM::InstanceProfile",
+      "Properties" : {
+        "Path" : "/",
+        "Roles" : [
+          {
+            "Ref" : "s3ROrole"
+          }
+        ]
+      }
+    },
+
+    "s3ROAccessPolicy" : {
+      "Type" : "AWS::IAM::Policy",
+      "Properties" : {
+        "PolicyName" : "s3ROAccessPolicy",
+        "PolicyDocument" : {
+          "Statement" : [
+            {
+              "Effect" : "Allow",
+              "Action": [
+                  "s3:Get*",
+                  "s3:List*"
+              ],
+              "Resource" : "*"
+            }
+          ]
+        },
+        "Roles" : [
+          {
+            "Ref" : "s3ROrole"
+          }
+        ]
+      }
+    },
+    "s3ROrole" : {
+      "Type" : "AWS::IAM::Role",
+      "Properties" : {
+        "AssumeRolePolicyDocument": {
+          "Version" : "2012-10-17",
+          "Statement" : [
+            {
+              "Effect" : "Allow",
+              "Principal" : {
+                "Service" : ["ec2.amazonaws.com"]
+              },
+              "Action" : [
+                "sts:AssumeRole"
+              ]
+            }
+          ]
+        },
+        "Path" : "/"
+      }
+    }
+
+
+
+  },
+    "Outputs": {
+
+		"WindowsFileGWInstance" : {
+		"Description" : "Public IP address of the newly created EC2 instance",
+		"Value" : { "Fn::GetAtt" : [ "WindowsFileGWInstance", "PublicIp" ] }
+		},
+
+    "WindowsVolGWInstance" : {
+      "Description" : "Public IP address of the newly created EC2 instance",
+      "Value" : { "Fn::GetAtt" : [ "WindowsVolGWInstance", "PublicIp" ] }
+    },
+
+    "WindowsTapeGWInstance" : {
+        "Description" : "Public IP address of the newly created EC2 instance",
+        "Value" : { "Fn::GetAtt" : [ "WindowsTapeGWInstance", "PublicIp" ] }
+    },
+
+		"LinuxInstance" : {
+		"Description" : "Public IP address of the newly created EC2 instance",
+		"Value" : { "Fn::GetAtt" : [ "LinuxInstance", "PublicIp" ] }
+		}
+
+		}
+	}
