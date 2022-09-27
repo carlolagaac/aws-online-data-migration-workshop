@@ -37,7 +37,7 @@ In this module you will perform the following tasks
 
 -   Format the volume to be used by the Windows Host
 
--   Transfer 10,000 small files from the local Windows host to the NFS share presented by the File Gateway
+-   Copy 10,000 small files from the local Windows host to the Cached Volume
 
 -   Verify data transferred to Amazon S3 by creating a snapshot of the cached volume and attaching to another instance for review
 
